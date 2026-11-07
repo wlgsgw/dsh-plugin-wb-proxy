@@ -1,0 +1,21 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8791 },
+  "clientToken": "local-proxy",
+  "upstream": {
+    "mode": "http",
+    "type": "openai",
+    "baseURL": "http://127.0.0.1:8790/v1",
+    "apiKey": "sk-REPLACE_WITH_YOUR_KEY",
+    "apiKeys": [],
+    "fallback": false,
+    "timeoutMs": 300000,
+    "maxRetries": 1,
+    "extraHeaders": {}
+  },
+  "modelMap": { "deepseek-flash": "deepseek-v4-flash", "deepseek-v4-pro": "deepseek-v4-pro" },
+  "catalog": [
+    { "id": "deepseek-flash", "name": "DeepSeek-V4.1-Flash (relay)", "context_window": 1048576, "max_output_tokens": 384000, "input_modalities": ["text", "image"] },
+    { "id": "deepseek-v4-pro", "name": "DeepSeek-V4-Pro (relay)", "context_window": 1048576, "max_output_tokens": 384000, "input_modalities": ["text"] }
+  ],
+  "log": { "dir": "./logs", "enabled": true }
+}

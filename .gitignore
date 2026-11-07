@@ -1,0 +1,24 @@
+# runtime
+logs/
+*.log
+*.bak-*
+*.bak-encoding
+
+# real config: only the samples in config/ are tracked
+/config.json
+/src/config.json
+
+# node / python
+node_modules/
+__pycache__/
+*.pyc
+
+# local relays copied next to the plugin
+py-packages/
+relay/
+
+# editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

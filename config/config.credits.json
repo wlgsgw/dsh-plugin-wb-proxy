@@ -1,0 +1,32 @@
+{
+  "listen": { "host": "127.0.0.1", "port": 8787 },
+  "clientToken": "local-proxy",
+  "upstream": {
+    "mode": "wbipc",
+    "type": "anthropic",
+    "baseURL": "https://api.deepseek.com/anthropic",
+    "apiKey": "",
+    "apiKeys": [],
+    "fallback": true,
+    "timeoutMs": 300000,
+    "maxRetries": 1,
+    "extraHeaders": {}
+  },
+  "wbipc": {
+    "path": "/v2/chat/completions",
+    "requestTimeoutMs": 52000,
+    "maxInputTokens": 20000,
+    "modelMap": { "deepseek-flash": "deepseek-v4-flash", "deepseek-v4-pro": "deepseek-v4-pro" }
+  },
+  "direct": {
+    "baseURL": "https://copilot.tencent.com",
+    "path": "/v2/chat/completions",
+    "modelMap": { "deepseek-flash": "deepseek-v4-flash", "deepseek-v4-pro": "deepseek-v4-pro" }
+  },
+  "modelMap": { "deepseek-flash": "deepseek-v4-flash", "deepseek-v4-pro": "deepseek-v4-pro" },
+  "catalog": [
+    { "id": "deepseek-flash", "name": "DeepSeek-V4.1-Flash (WB credits)", "context_window": 1048576, "max_output_tokens": 384000, "input_modalities": ["text", "image"] },
+    { "id": "deepseek-v4-pro", "name": "DeepSeek-V4-Pro (WB credits)", "context_window": 1048576, "max_output_tokens": 384000, "input_modalities": ["text"] }
+  ],
+  "log": { "dir": "./logs", "enabled": true }
+}

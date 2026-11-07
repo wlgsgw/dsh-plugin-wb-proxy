@@ -1,0 +1,42 @@
+{
+  "name": "dsh-plugin-wb-proxy",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH plugin: reverse-proxy the WorkBuddy credit channel into an Anthropic Messages endpoint (port 8787, direct / wbipc / key fallback)",
+  "main": "src/server.mjs",
+  "bin": {
+    "wb-proxy": "src/server.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "setup": "node setup.mjs",
+    "start": "node src/server.mjs",
+    "test": "node tests/smoke.mjs --live",
+    "pack": "node scripts/pack.mjs --out ..",
+    "repair-encoding": "node scripts/repair-encoding.mjs --scan src/server.mjs src/direct-upstream.mjs src/wbipc-client.mjs src/wbipc-upstream.mjs"
+  },
+  "files": [
+    "setup.mjs",
+    "src",
+    "bin",
+    "config",
+    "patch",
+    "scripts",
+    "tests",
+    "README.md"
+  ],
+  "dsh": {
+    "plugin": {
+      "kind": "llm-provider-bridge",
+      "profilePatch": "patch/cordis.patch.snippet.yml",
+      "runtime": "setup.mjs",
+      "requires": {
+        "dsh": ">=1.0.0",
+        "node": ">=18"
+      }
+    }
+  }
+}

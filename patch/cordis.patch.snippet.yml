@@ -1,0 +1,37 @@
+# wb-proxy | DSH profile patch fragment
+#
+# Append the entries below to the top-level array of
+#   ~/.dsh/profiles/<profile>/cordis.patch.yml
+# setup.mjs does this automatically; when merging by hand make sure llm-deepseek
+# does not appear twice.
+#
+# Semantics: point the official DeepSeek route (provider id = deepseek-official) at
+#   http://127.0.0.1:8787   <- the local proxy started by this plugin
+# The real upstream key stays in the proxy config.json and never enters DSH config.
+
+- id: llm-deepseek
+  name: "@deepseek-ai/dsh-llm-deepseek-api-key"
+  config:
+    baseURL: http://127.0.0.1:8787
+    apiKeyEnv: DEEPSEEK_PROXY_KEY
+    reasoningEffort: high
+    models:
+      - id: deepseek-flash
+        name: DeepSeek-V4.1-Flash (WB proxy)
+        contextWindow: 1048576
+        inputModalities: [ text, image ]
+        systemPromptUpdate: in-history
+        toolUpdate: addition-only
+      - id: deepseek-v4-pro
+        name: DeepSeek-V4-Pro (WB proxy)
+        contextWindow: 1048576
+        inputModalities: [ text ]
+
+# Optional: also make this route the default model. Drop this block to keep the
+# account route (deepseek-account) as the default instead.
+# - id: agent-default-model
+#   name: "@deepseek-ai/dsh-agent-default-model"
+#   config:
+#     provider: deepseek-official
+#     model: deepseek-flash
+#     reasoningEffort: high
