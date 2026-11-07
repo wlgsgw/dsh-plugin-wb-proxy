@@ -288,8 +288,8 @@ export class StreamTranslator {
 
   finish(reason) {
     if (this.finished) return '';
-    this.finished = true;
     if (!this.started) return this.start() + this.finish(reason);
+    this.finished = true;
     let out = this.closeCurrent();
     out += sse('message_delta', {
       type: 'message_delta',

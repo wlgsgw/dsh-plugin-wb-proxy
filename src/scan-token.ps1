@@ -1,5 +1,10 @@
 # Read-only scan of WorkBuddy process memory for bearer tokens (JWT-shaped strings).
 # Does not modify, inject, or suspend anything.
+#
+# On-disk output is deliberately minimal:
+#   logs\token.json   only the token direct-upstream.mjs must send (it cannot hash it)
+#   logs\mem-tokens.json  one summary line per hit: 8-char prefix, length, exp, aud, sub
+# No payload, no full JWT is ever printed to the console by this script.
 $ErrorActionPreference = 'Stop'
 
 Add-Type -Namespace WbScan -Name Native -MemberDefinition @'
@@ -25,6 +30,43 @@ public const uint PAGE_GUARD = 0x100;
 
 $jwt = [regex]'eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}'
 $hits = [System.Collections.Generic.HashSet[string]]::new()
+
+# secret-bearing output lives in logs\\ next to this script, owner-only
+$logDir = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'logs'
+if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+$acl = Get-Acl -LiteralPath $logDir
+$acl.SetAccessRuleProtection($true, $false)
+$acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($me, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+Set-Acl -LiteralPath $logDir -AclObject $acl
+
+function Protect-SecretFile([string] $path) {
+    $fileAcl = Get-Acl -LiteralPath $path
+    $fileAcl.SetAccessRuleProtection($true, $false)
+    $fileAcl.Access | ForEach-Object { $fileAcl.RemoveAccessRule($_) | Out-Null }
+    $fileAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($me, 'FullControl', 'Allow'))
+    Set-Acl -LiteralPath $path -AclObject $fileAcl
+}
+
+function ConvertFrom-JwtSegment([string] $segment) {
+    $pad = $segment.Replace('-','+').Replace('_','/')
+    while ($pad.Length % 4) { $pad += '=' }
+    [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pad))
+}
+
+function Get-TokenFacts([string] $token) {
+    $exp = $null
+    $aud = ''
+    $sub = ''
+    try {
+        $p = ConvertFrom-JwtSegment ($token.Split('.')[1]) | ConvertFrom-Json
+        if ($null -ne $p.exp) { $exp = [double]$p.exp }
+        if ($null -ne $p.aud) { $aud = [string]$p.aud }
+        if ($null -ne $p.sub) { $sub = [string]$p.sub }
+    } catch { }
+    [pscustomobject]@{ exp = $exp; aud = $aud; sub = $sub }
+}
 
 $procs = Get-Process WorkBuddy -ErrorAction SilentlyContinue | Select-Object -First 8
 foreach ($p in $procs) {
@@ -60,41 +102,35 @@ foreach ($p in $procs) {
 "total unique JWT-like strings: $($hits.Count)"
 $records = @()
 foreach ($t in $hits) {
-    $parts = $t.Split('.')
-    $payload = ''
-    try {
-        $pad = $parts[1].Replace('-','+').Replace('_','/')
-        while ($pad.Length % 4) { $pad += '=' }
-        $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($pad))
-    } catch { }
-    $records += [pscustomobject]@{ token = $t; len = $t.Length; payload = $payload }
-    "--- token: $($t.Substring(0,12))... len=$($t.Length)"
-    if ($payload) { "    payload: " + $payload.Substring(0, [Math]::Min(220, $payload.Length)) }
+    $facts = Get-TokenFacts $t
+    $records += [pscustomobject]@{
+        peek = $t.Substring(0, [Math]::Min(8, $t.Length))
+        len = $t.Length
+        exp = $facts.exp
+        aud = $facts.aud
+        sub = $facts.sub
+    }
+    "--- token $($t.Substring(0, [Math]::Min(8, $t.Length)))... len=$($t.Length) exp=$($facts.exp)"
 }
-$out = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'logs\mem-tokens.json'
+$out = Join-Path $logDir 'mem-tokens.json'
 $records | ConvertTo-Json -Depth 4 | Set-Content -Path $out -Encoding utf8
-"saved: $out"
+Protect-SecretFile $out
+"saved summary: $out"
 
 # 选一条 best token 给 counter 使用：aud=account 且 exp 最大
 $best = $null
-foreach ($r in $records) {
-    if ($r.payload -notmatch '"aud":"account"') { continue }
-    try {
-        $p = $r.payload | ConvertFrom-Json
-        if (-not $best -or [double]$p.exp -gt [double]$best.exp) { $best = [pscustomobject]@{ exp = [double]$p.exp; token = $r.token } }
-    } catch { }
+foreach ($t in $hits) {
+    $facts = Get-TokenFacts $t
+    if ($facts.aud -notmatch '\baccount\b') { continue }
+    if ($null -eq $facts.exp) { continue }
+    if (-not $best -or $facts.exp -gt $best.exp) { $best = [pscustomobject]@{ exp = $facts.exp; token = $t; sub = $facts.sub } }
 }
 if ($best) {
-    $tokenFile = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'logs\token.json'
-    $sub = ''
-    try {
-        $seg = $best.token.Split('.')[1].Replace('-','+').Replace('_','/')
-        while ($seg.Length % 4) { $seg += '=' }
-        $sub = ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($seg)) | ConvertFrom-Json).sub
-    } catch { }
-    $payload = [pscustomobject]@{ token = $best.token; exp = $best.exp; sub = $sub; scannedAt = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress
+    $tokenFile = Join-Path $logDir 'token.json'
+    $payload = [pscustomobject]@{ token = $best.token; exp = $best.exp; sub = $best.sub; scannedAt = (Get-Date).ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress
     [IO.File]::WriteAllText($tokenFile, $payload, (New-Object Text.UTF8Encoding($false)))
-    "best token saved: $tokenFile (exp=$($best.exp) sub=$sub)"
+    Protect-SecretFile $tokenFile
+    "best token saved: $tokenFile (exp=$($best.exp) sub=$($best.sub))"
 } else {
     "no aud=account token found"
 }

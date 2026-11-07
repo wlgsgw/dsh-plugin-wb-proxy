@@ -31,7 +31,7 @@ const STAGE = join(tmpdir(), 'dsh-pack-' + Date.now());
 const ZIP = join(OUT, NAME + '.zip');
 
 const SKIP_DIRS = new Set(['logs', 'node_modules', '.git', '__pycache__', 'dist']);
-const SKIP_RE = [/\.pyc$/u, /\.log$/u, /\.bak-[^\\/]*$/u, /\.bak-encoding$/u];
+const SKIP_RE = [/\.pyc$/u, /\.log$/u, /\.bak-[^\\/]*$/u, /\.bak-encoding$/u, /^(?:[\\/]|\.\.?[\\/])?config\.json$/u, /\.tmp(?:\.json)?$/u];
 
 function skip(rel, name) {
   const first = rel.split(/[\\/]/)[0];
@@ -68,13 +68,20 @@ mkdirSync(OUT, { recursive: true });
 rmSync(STAGE, { recursive: true, force: true });
 mkdirSync(join(STAGE, NAME), { recursive: true });
 copyTree(ROOT, ROOT);
-mkdirSync(join(STAGE, NAME, 'logs'), { recursive: true });
+// a shipped archive must never carry credentials, tokens or request logs
+for (const dir of ['logs', 'temp', 'temps', 'tmp', '.tmp']) {
+  mkdirSync(join(STAGE, NAME, dir), { recursive: true });
+}
 
 console.log('staged ' + countFiles(join(STAGE, NAME)) + ' file(s)');
 
 if (existsSync(ZIP)) rmSync(ZIP, { force: true });
-const zipScript = "Compress-Archive -Path '" + STAGE + "\\*' -DestinationPath '" + ZIP + "' -CompressionLevel Optimal -Force";
-const zipped = spawnSync('powershell', ['-NoProfile', '-Command', zipScript], { encoding: 'utf8' });
+// paths travel through the environment, never spliced into PowerShell source
+const zipScript = 'Compress-Archive -Path (Join-Path $env:WB_PACK_STAGE "*") -DestinationPath $env:WB_PACK_ZIP -CompressionLevel Optimal -Force';
+const zipped = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', zipScript], {
+  encoding: 'utf8',
+  env: { ...process.env, WB_PACK_STAGE: join(STAGE, NAME), WB_PACK_ZIP: ZIP },
+});
 if (zipped.status !== 0) {
   console.error(String(zipped.stderr || 'compress failed'));
   process.exit(1);
@@ -87,8 +94,8 @@ if (VERIFY) {
   mkdirSync(unpack, { recursive: true });
   const expanded = spawnSync(
     'powershell',
-    ['-NoProfile', '-Command', "Expand-Archive -Path '" + ZIP + "' -DestinationPath '" + unpack + "' -Force"],
-    { encoding: 'utf8' },
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'Expand-Archive -Path $env:WB_PACK_ZIP -DestinationPath $env:WB_PACK_DEST -Force'],
+    { encoding: 'utf8', env: { ...process.env, WB_PACK_ZIP: ZIP, WB_PACK_DEST: unpack } },
   );
   if (expanded.status !== 0) {
     console.error(String(expanded.stderr || 'expand failed'));

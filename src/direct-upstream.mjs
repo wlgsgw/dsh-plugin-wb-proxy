@@ -22,7 +22,8 @@ export function sanitizeSystem(text) {
     .replace(/(explicitly referenced\.)[ \t]+(Relative paths)/gu, '$1\n$2');
 }
 
-export function sanitizeMessages(messages) {  if (!Array.isArray(messages)) return messages;
+export function sanitizeMessages(messages) {
+  if (!Array.isArray(messages)) return messages;
   const first = messages[0];
   if (first && first.role === 'system' && typeof first.content === 'string') {
     return [{ ...first, content: sanitizeSystem(first.content) }, ...messages.slice(1)];
@@ -40,6 +41,9 @@ export class DirectUpstream {
     refreshSkewSeconds = 300,
     maxConcurrent = 3,
     extraHeaders = {},
+    refreshTimeoutMs = 30_000,
+    refreshMaxOutput = 16 * 1024,
+    queueTimeoutMs = 60_000,
   } = {}) {
     this.baseURL = baseURL.replace(/\/+$/u, '');
     this.path = path;
@@ -47,6 +51,9 @@ export class DirectUpstream {
     this.scanScript = resolve(scanScript);
     this.modelMap = modelMap;
     this.refreshSkewSeconds = refreshSkewSeconds;
+    this.refreshTimeoutMs = refreshTimeoutMs;
+    this.refreshMaxOutput = refreshMaxOutput;
+    this.queueTimeoutMs = queueTimeoutMs;
     this.extraHeaders = extraHeaders;
     this.refreshing = null;
     this.maxConcurrent = maxConcurrent;
@@ -90,18 +97,36 @@ export class DirectUpstream {
         windowsHide: true,
       });
       let output = '';
-      child.stdout.on('data', (chunk) => {
-        output += String(chunk);
-      });
-      child.stderr.on('data', (chunk) => {
-        output += String(chunk);
-      });
-      child.on('error', rejectPromise);
-      child.on('close', (code) => {
+      let settled = false;
+      const settle = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
         this.refreshing = null;
+        fn(value);
+      };
+      const append = (chunk) => {
+        // bounded capture: a chatty or hostile script must not grow the heap
+        if (output.length >= this.refreshMaxOutput) return;
+        output += String(chunk);
+        if (output.length > this.refreshMaxOutput) output = output.slice(0, this.refreshMaxOutput);
+      };
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          /* already gone */
+        }
+        settle(rejectPromise, new Error(`token scan timed out after ${this.refreshTimeoutMs}ms`));
+      }, this.refreshTimeoutMs);
+      timer.unref?.();
+      child.stdout.on('data', append);
+      child.stderr.on('data', append);
+      child.on('error', (error) => settle(rejectPromise, error));
+      child.on('close', (code) => {
         const record = this.readToken();
-        if (record) resolvePromise(record);
-        else rejectPromise(new Error(`token scan produced no usable token (exit ${code}): ${output.slice(-300)}`));
+        if (record) settle(resolvePromise, record);
+        else settle(rejectPromise, new Error(`token scan produced no usable token (exit ${code}): ${output.slice(-300)}`));
       });
     });
     return this.refreshing;
@@ -116,7 +141,9 @@ export class DirectUpstream {
     return record.token;
   }
 
-  acquire() {
+  /** Take a concurrency slot; rejects instead of queueing forever when the pool stays saturated. */
+  acquire(signal) {
+    if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('aborted'));
     if (this.active < this.maxConcurrent) {
       this.active += 1;
       return Promise.resolve(() => {
@@ -124,20 +151,45 @@ export class DirectUpstream {
         this.drain();
       });
     }
-    return new Promise((resolvePromise) => {
-      this.queue.push(() => {
-        this.active += 1;
-        resolvePromise(() => {
-          this.active -= 1;
-          this.drain();
-        });
-      });
+    if (this.queueTimeoutMs <= 0) {
+      return Promise.reject(new Error(`direct upstream saturated (${this.maxConcurrent} in flight)`));
+    }
+    return new Promise((resolvePromise, rejectPromise) => {
+      const waiter = {
+        grant: () => {
+          cleanup();
+          this.active += 1;
+          resolvePromise(() => {
+            this.active -= 1;
+            this.drain();
+          });
+        },
+        reject: () => {
+          cleanup();
+          rejectPromise(new Error(`direct upstream queue timeout after ${this.queueTimeoutMs}ms`));
+        },
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener?.('abort', onAbort);
+        const at = this.queue.indexOf(waiter);
+        if (at !== -1) this.queue.splice(at, 1);
+      };
+      const onAbort = () => {
+        cleanup();
+        rejectPromise(signal.reason ?? new Error('aborted'));
+      };
+      // deliberately not unref'd: a queued request must be released even when
+      // it is the only thing keeping the event loop alive
+      const timer = setTimeout(waiter.reject, this.queueTimeoutMs);
+      signal?.addEventListener?.('abort', onAbort, { once: true });
+      this.queue.push(waiter);
     });
   }
 
   drain() {
     while (this.queue.length > 0 && this.active < this.maxConcurrent) {
-      this.queue.shift()();
+      this.queue.shift().grant();
     }
   }
 
@@ -183,7 +235,7 @@ export class DirectUpstream {
         signal,
       });
 
-    const release = await this.acquire();
+    const release = await this.acquire(signal);
     try {
       let response = await send(await this.token());
       if (response.status === 401) {
@@ -194,9 +246,13 @@ export class DirectUpstream {
           response = await send(await this.token(true));
         }
       }
-      return { response, wbModel };
-    } finally {
+      // the slot only guards the request until the response headers arrive;
+      // streaming the body must not keep the pool blocked.
       release();
+      return { response, wbModel };
+    } catch (error) {
+      release();
+      throw error;
     }
   }
 }

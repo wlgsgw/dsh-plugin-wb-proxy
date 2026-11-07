@@ -7,6 +7,9 @@ import { join } from 'node:path';
 
 const b64url = (buf) => Buffer.from(buf).toString('base64url');
 
+/** A single JSON line frame is tiny; a larger unterminated buffer means a broken peer. */
+const MAX_BUFFER_BYTES = 8 * 1024 * 1024;
+
 function encodeTranscript(side, { protocol, endpoint, clientNonce, serverNonce }) {
   const parts = [side === 'server' ? 'wbipc-s' : 'wbipc-c', String(protocol), endpoint, clientNonce, serverNonce];
   const chunks = [];
@@ -40,9 +43,13 @@ export class WbipcClient {
     this.pipes = [];
     this.epoch = null;
     this.channels = new Map();
+    this.closed = false;
   }
 
   send(frame) {
+    if (!this.socket || this.socket.destroyed || !this.socket.writable) {
+      throw new Error('wbipc socket is not writable');
+    }
     this.socket.write(`${JSON.stringify(frame)}\n`, 'utf8');
   }
 
@@ -86,7 +93,7 @@ export class WbipcClient {
   }
 
   fail(error) {
-    this.error = error;
+    this.error ??= error;
     this.onReady?.();
   }
 
@@ -94,22 +101,49 @@ export class WbipcClient {
     return new Promise((resolve, reject) => {
       const socket = net.connect(this.endpoint);
       this.socket = socket;
-      const timer = setTimeout(() => reject(new Error('handshake timeout')), timeoutMs);
+      let settled = false;
+      let ready = false;
+      const settle = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        fn(value);
+      };
+      // pre-handshake failures tear the socket down (a half-open socket leaks a
+      // handle); after a successful handshake the socket belongs to the session.
+      const failAndDestroy = (error) => {
+        if (ready) {
+          fail(error);
+          return;
+        }
+        socket.destroy();
+        settle(reject, error);
+      };
+      const timer = setTimeout(() => failAndDestroy(new Error('handshake timeout')), timeoutMs);
 
       socket.on('connect', () => {
+        socket.setNoDelay(true);
         this.clientNonce = crypto.randomBytes(16).toString('base64url');
-        this.send({
-          type: 'session_hello',
-          protocol_min: 1,
-          protocol_max: 1,
-          client_nonce: this.clientNonce,
-          ticket_id: ticketId(this.ticket),
-          client: { kind: 'dsh-proxy', id: 'wb-deepseek-proxy', version: '1.0.0' },
-        });
+        socket.write(
+          `${JSON.stringify({
+            type: 'session_hello',
+            protocol_min: 1,
+            protocol_max: 1,
+            client_nonce: this.clientNonce,
+            ticket_id: ticketId(this.ticket),
+            client: { kind: 'dsh-proxy', id: 'wb-deepseek-proxy', version: '1.0.0' },
+          })}\n`,
+          'utf8',
+        );
       });
 
       socket.on('data', (chunk) => {
+        if (settled && this.closed) return;
         this.buffer = Buffer.concat([this.buffer, chunk]);
+        if (this.buffer.length > MAX_BUFFER_BYTES) {
+          failAndDestroy(new Error(`wbipc peer sent more than ${MAX_BUFFER_BYTES} bytes without a frame boundary`));
+          return;
+        }
         for (;;) {
           const nl = this.buffer.indexOf(10);
           if (nl < 0) break;
@@ -126,17 +160,34 @@ export class WbipcClient {
         }
       });
 
-      socket.on('error', (error) => {
-        clearTimeout(timer);
-        reject(error);
+      socket.on('error', (error) => failAndDestroy(error));
+
+      // peer closed before/after the handshake: nothing can be answered any more
+      socket.on('close', () => {
+        this.closed = true;
+        failAndDestroy(this.error ?? new Error('wbipc socket closed'));
+        this.abortPending(new Error('wbipc socket closed'));
       });
 
       this.onReady = () => {
-        clearTimeout(timer);
-        if (this.error) reject(this.error);
-        else resolve(this);
+        if (this.error) {
+          socket.destroy();
+          settle(reject, this.error);
+          return;
+        }
+        ready = true;
+        settle(resolve, this);
       };
     });
+  }
+
+  /** Reject every in-flight rpc so callers never wait for a dead socket. */
+  abortPending(error) {
+    for (const [id, entry] of this.pending) {
+      this.pending.delete(id);
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
   }
 
   rpc(method, params = {}, { timeoutMs = 60000, mode } = {}) {
@@ -149,7 +200,13 @@ export class WbipcClient {
         reject(new Error(`rpc timeout: ${method}`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      this.send(frame);
+      try {
+        this.send(frame);
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      }
     });
   }
 
@@ -175,6 +232,8 @@ export class WbipcClient {
   }
 
   close() {
+    this.closed = true;
+    this.abortPending(new Error('wbipc client closed'));
     this.socket?.destroy();
   }
 }

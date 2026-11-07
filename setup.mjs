@@ -102,7 +102,7 @@ if (!DRY && existsSync(configPath)) {
   cfg.upstream.mode = MODE;
   cfg.log = Object.assign({ dir: './logs', enabled: true }, cfg.log || {});
   writeText(configPath, JSON.stringify(cfg, null, 2) + '\n');
-  step('config.json', 'mode=' + MODE + ' port=' + PORT + ' token=' + CLIENT_TOKEN);
+  step('config.json', 'mode=' + MODE + ' port=' + PORT);
 }
 
 // ---- 3) cordis.patch.yml --------------------------------------------------
@@ -181,9 +181,13 @@ if (flag('no-autostart') || process.platform !== 'win32') {
   skip('autostart', flag('no-autostart') ? 'skipped (--no-autostart)' : 'not win32');
 } else {
   const startScript = join(RUNTIME_DIR, 'bin', 'start.ps1');
+  // The script path is handed over as $env:WB_START_SCRIPT instead of being spliced into
+  // PowerShell source, so a quote or ';' in the install path cannot become a command.
   const ps = [
     "$ErrorActionPreference='Stop'",
-    "$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"" + startScript + "\"'",
+    '$path = $env:WB_START_SCRIPT',
+    'if (-not $path) { throw "WB_START_SCRIPT is not set" }',
+    "$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"' + $path + '\"')",
     '$t1 = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME',
     '$t2 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)',
     '$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)',
@@ -193,9 +197,13 @@ if (flag('no-autostart') || process.platform !== 'win32') {
 
   if (DRY) {
     console.log('\n----- scheduled task (dry-run, not registered) -----\n' + ps + '\n');
+    console.log('  WB_START_SCRIPT = ' + startScript + '\n');
     skip('autostart', 'dry-run');
   } else {
-    const result = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { encoding: 'utf8' });
+    const result = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], {
+      encoding: 'utf8',
+      env: { ...process.env, WB_START_SCRIPT: startScript },
+    });
     if (result.status === 0) {
       step('autostart', 'WbDeepseekProxy registered and started');
     } else {

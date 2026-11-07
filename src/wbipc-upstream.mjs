@@ -52,9 +52,19 @@ export class WbipcUpstream {
   }
 }
 
+/** Anthropic content block indexes are bounded by the API contract (0..1023). */
+const MAX_BLOCK_INDEX = 1023;
+
+/** Valid 0..1023 block index, or null when the frame carries no usable index. */
+function blockIndex(value) {
+  const index = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(index) || index < 0 || index > MAX_BLOCK_INDEX) return null;
+  return index;
+}
+
 /** Parse an Anthropic SSE stream into one Anthropic message JSON (for non-streaming calls). */
 export function sseToMessage(sseText, model) {
-  const content = [];
+  const content = new Map();
   let stopReason = 'end_turn';
   let usage = { input_tokens: 0, output_tokens: 0 };
 
@@ -71,12 +81,19 @@ export function sseToMessage(sseText, model) {
     } catch {
       continue;
     }
-    if (event.type === 'content_block_start') content[event.index] = { ...event.content_block };
+    if (event.type === 'content_block_start') {
+      const index = blockIndex(event.index);
+      if (index !== null) content.set(index, { ...event.content_block });
+    }
     if (event.type === 'content_block_delta') {
-      const slot = content[event.index] ?? {};
-      if (event.delta.type === 'text_delta') slot.text = (slot.text ?? '') + event.delta.text;
-      if (event.delta.type === 'input_json_delta') slot._json = (slot._json ?? '') + event.delta.partial_json;
-      content[event.index] = slot;
+      const index = blockIndex(event.index);
+      const delta = event.delta ?? {};
+      if (index !== null && (delta.type === 'text_delta' || delta.type === 'input_json_delta')) {
+        const slot = content.get(index) ?? {};
+        if (delta.type === 'text_delta') slot.text = (slot.text ?? '') + String(delta.text ?? '');
+        else slot._json = (slot._json ?? '') + String(delta.partial_json ?? '');
+        content.set(index, slot);
+      }
     }
     if (event.type === 'message_delta') {
       stopReason = event.delta?.stop_reason ?? stopReason;
@@ -85,18 +102,20 @@ export function sseToMessage(sseText, model) {
     if (event.type === 'message_start' && event.message?.usage) usage.input_tokens = event.message.usage.input_tokens ?? 0;
   }
 
-  const blocks = content.filter(Boolean).map((block) => {
-    if (block.type === 'tool_use') {
-      let input = {};
-      try {
-        input = block._json ? JSON.parse(block._json) : {};
-      } catch {
-        input = {};
+  const blocks = [...content.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, block]) => {
+      if (block.type === 'tool_use') {
+        let input = {};
+        try {
+          input = block._json ? JSON.parse(block._json) : {};
+        } catch {
+          input = {};
+        }
+        return { type: 'tool_use', id: block.id, name: block.name, input };
       }
-      return { type: 'tool_use', id: block.id, name: block.name, input };
-    }
-    return { type: 'text', text: block.text ?? '' };
-  });
+      return { type: 'text', text: block.text ?? '' };
+    });
   if (blocks.length === 0) blocks.push({ type: 'text', text: '' });
 
   return {
