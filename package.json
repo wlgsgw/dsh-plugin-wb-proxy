@@ -14,7 +14,7 @@
   "scripts": {
     "setup": "node setup.mjs",
     "start": "node src/server.mjs",
-    "test": "node tests/smoke.mjs --live",
+    "test": "node tests/smoke.mjs --live && node tests/stream-offline.mjs && node tests/accept.mjs",
     "pack": "node scripts/pack.mjs --out ..",
     "repair-encoding": "node scripts/repair-encoding.mjs --scan src/server.mjs src/direct-upstream.mjs src/wbipc-client.mjs src/wbipc-upstream.mjs"
   },
